@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ── Trading accounts ─────────────────────────────────────────────────────────
+
+model Account {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  keyHash      String   @unique
+  keyPreview   String
+  kind         String   @default("margin")
+  startingCash Float
+  createdAt    DateTime @default(now())
+
+  orders     Order[]
+  fills      Fill[]
+  positions  Position[]
+  ledger     CashLedger[]
+  snapshots  EquitySnapshot[]
+  dayTrades  DayTrade[]
+}
+
+model Position {
+  id          String   @id @default(cuid())
+  accountId   String
+  symbol      String
+  qty         Float
+  avgPrice    Float
+  realizedPnl Float    @default(0)
+  openedAt    DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, symbol])
+  @@index([accountId])
+}
+
+model Order {
+  id           String    @id @default(cuid())
+  accountId    String
+  symbol       String
+  side         String
+  orderType    String
+  qty          Float
+  limitPrice   Float?
+  tif          String    @default("day")
+  status       String
+  filledQty    Float     @default(0)
+  avgFillPrice Float?
+  rejectReason String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  expiresAt    DateTime?
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  fills   Fill[]
+
+  @@index([accountId, status])
+  @@index([symbol, status])
+}
+
+model Fill {
+  id        String   @id @default(cuid())
+  orderId   String
+  accountId String
+  symbol    String
+  side      String
+  qty       Float
+  price     Float
+  fees      Float
+  ts        DateTime @default(now())
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, ts])
+}
+
+model CashLedger {
+  id         String    @id @default(cuid())
+  accountId  String
+  kind       String
+  amount     Float
+  settled    Boolean   @default(true)
+  settleDate DateTime?
+  ref        String?
+  ts         DateTime  @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, settled])
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  accountId String?
+  kind      String
+  symbol    String?
+  message   String
+  meta      String?
+  ts        DateTime @default(now())
+
+  @@index([ts])
+  @@index([accountId, ts])
+}
+
+model EquitySnapshot {
+  id        String   @id @default(cuid())
+  accountId String
+  equity    Float
+  cash      Float
+  ts        DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, ts])
+}
+
+model DayTrade {
+  id        String   @id @default(cuid())
+  accountId String
+  symbol    String
+  ts        DateTime
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, ts])
+}
+
+model NewsItem {
+  id          String   @id @default(cuid())
+  providerId  String   @unique
+  headline    String
+  source      String
+  url         String
+  symbols     String   @default("[]")
+  summary     String?
+  publishedAt DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([publishedAt])
+}

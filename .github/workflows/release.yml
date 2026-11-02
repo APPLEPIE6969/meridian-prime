@@ -1,0 +1,166 @@
+name: Release
+
+# Publishes a GitHub release when a v* tag is pushed.
+#
+# Pipeline:
+#   1. gate    — the full CI matrix (typecheck · lint · build · unit suite at
+#                the coverage gate · smoke/api-matrix/MCP/websocket e2e) runs
+#                on the exact tag commit. A release is cut only if everything
+#                is green.
+#   2. publish — rebuilds the standalone server, stages a self-hostable
+#                distributable (server + MCP adapter + market relay + Prisma
+#                schema + docs), zips it, checksums it, and publishes the
+#                GitHub release with the artifact attached.
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Gate · full CI matrix on the release tag
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Package & publish GitHub release
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Version guard (tag must match package.json)
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${PKG}"
+            exit 1
+          fi
+          echo "Releasing Meridian Prime ${GITHUB_REF_NAME}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Production build (standalone)
+        run: npm run build
+
+      - name: Stage distributable
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          STAGE="dist/meridian-prime-${VERSION}"
+          mkdir -p "$STAGE"
+
+          # Prebuilt standalone server (includes .next/static, public and the
+          # traced node_modules produced by `npm run build`).
+          cp -a .next/standalone/. "$STAGE/"
+
+          # Dependency-free MCP adapter (Claude Desktop / Claude Code / Cursor).
+          mkdir -p "$STAGE/src/mcp"
+          cp src/mcp/server.mjs "$STAGE/src/mcp/server.mjs"
+
+          # Socket.IO market relay (source only; operator runs npm ci).
+          mkdir -p "$STAGE/mini-services"
+          cp -a mini-services/relay "$STAGE/mini-services/relay"
+          rm -rf "$STAGE/mini-services/relay/node_modules"
+
+          # Schema + docs needed to bootstrap and operate the install.
+          mkdir -p "$STAGE/prisma"
+          cp prisma/schema.prisma "$STAGE/prisma/schema.prisma"
+          cp README.md LICENSE .env.example "$STAGE/"
+
+          cat > "$STAGE/RELEASE.md" <<'EOF'
+          # Meridian Prime — standalone build
+
+          Prebuilt server (Linux x64). No build step required — Node.js 20.9+ only.
+
+          ## Run it
+
+              export DATABASE_URL="file:$(pwd)/prime.db"   # absolute path is safest
+              node scripts/db-push.mjs                     # one-time: creates prime.db
+                                                           # (or: npx prisma db push --accept-data-loss)
+              PORT=3000 node server.js                     # start the desk
+
+          - Operator console:  http://localhost:3000  (passcode in MERIDIAN_OPERATOR_PASSCODE)
+          - Trading REST API:  http://localhost:3000/api/v1  (machine docs at /api/v1/docs)
+          - Market data:       live US market data — no API key required
+
+          ## Trade with an AI agent over MCP
+
+          Create the account (console UI, `POST /api/console/agents` with the
+          operator passcode, or `node scripts/create-agent.mjs --name "Vega-1"`)
+          to get its `mrp_live_` API key, then point the MCP adapter at it:
+
+              MERIDIAN_API_KEY=mrp_live_... node src/mcp/server.mjs
+
+          ## Live WebSocket streaming (optional)
+
+              cd mini-services/relay
+              npm ci
+              npx tsx index.ts          # serves ws://localhost:3003
+
+          and set `MERIDIAN_RELAY_URL=http://localhost:3003` for the desk plus
+          `NEXT_PUBLIC_RELAY_URL` for the browser.
+
+          ## Configuration
+
+          See `.env.example` (DATABASE_URL, MERIDIAN_OPERATOR_PASSCODE,
+          MERIDIAN_DATA_PROVIDER, relay settings). On macOS/Windows, build
+          from source instead: `npm ci && npx prisma generate && npm run build && npm start`.
+          EOF
+
+      - name: Zip distributable + checksums
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cd dist
+          zip -qr "meridian-prime-${VERSION}-standalone.zip" "meridian-prime-${VERSION}"
+          sha256sum "meridian-prime-${VERSION}-standalone.zip" > SHA256SUMS.txt
+          unzip -t "meridian-prime-${VERSION}-standalone.zip" > /dev/null
+          ls -la
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Meridian Prime ${{ github.ref_name }}
+          body: |
+            **Meridian Prime ${{ github.ref_name }}** — a multi-agent trading desk on live US market data.
+
+            - 51 real US listings (42 operating companies + 9 sector ETFs) across 9 GICS sectors
+            - Live quotes, candles, dividend events and a real headline wire from the market data provider — no API key needed
+            - Real NYSE sessions: published holiday calendar, early closes, pre/post market, DST-correct exchange time
+            - Realistic execution: fills against the live book, volume-capped partial fills, size-based market impact, T+1 settlement
+            - Reg-T margin with forced liquidations, PDT rule, SEC/TAF fee schedule, cash accounts
+            - Full REST trading API (`/api/v1`) + MCP adapter for Claude Desktop / Claude Code / Cursor
+            - Operator console: watch every agent's orders, fills, positions and P&L in real time
+            - Socket.IO relay for live console streaming
+            - Verified by the full CI matrix before publishing: typecheck · lint · build · the unit suite at the coverage gate · smoke / api-matrix / MCP / relay conformance suites
+
+            ## Attachments
+
+            | file | purpose |
+            |------|---------|
+            | `meridian-prime-${{ github.ref_name }}-standalone.zip` | prebuilt server (Linux x64) — unzip, `node scripts/db-push.mjs`, `DATABASE_URL=... node server.js`; see `RELEASE.md` inside |
+            | `SHA256SUMS.txt` | sha256 checksum of the archive |
+
+            On macOS/Windows build from source: `npm ci && npx prisma generate && npm run build && npm start`.
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/meridian-prime-${{ github.ref_name }}-standalone.zip
+            dist/SHA256SUMS.txt

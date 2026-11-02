@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MERIDIAN_DATA_PROVIDER: fixture
+  MERIDIAN_CLOCK: 2026-01-05T14:30:00Z  # frozen Monday 09:30 ET: deterministic sessions in CI
+
+jobs:
+  verify:
+    name: Typecheck · Lint · Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+  unit:
+    name: Unit suite · coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run unit suite with coverage gate
+        run: npm run test:unit:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            coverage/lcov.info
+            coverage/html/
+          retention-days: 7
+
+  e2e:
+    name: E2E · smoke · api-matrix · MCP · websocket
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Create fresh desk database
+        run: node scripts/db-push.mjs --skip-generate
+
+      - name: Production build
+        run: npm run build
+
+      - name: Start desk server (standalone)
+        run: |
+          NODE_ENV=production node .next/standalone/server.js &
+          up=0
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/api/v1/market/status > /dev/null; then
+              echo "desk is up"
+              up=1
+              break
+            fi
+            sleep 2
+          done
+          [ "$up" = "1" ] || (echo "server failed to boot" && exit 1)
+
+      - name: Warm the market data feed
+        run: |
+          # The first quote cycle lands right after boot; give it a moment so
+          # the trading suites always see a primed book.
+          for i in $(seq 1 15); do
+            n=$(curl -s http://localhost:3000/api/v1/market/status | node -e "let d='';process.stdin.on('data',(c)=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).data.marketData.quotesLive)}catch{console.log(0)}})")
+            if [ "$n" -gt "0" ] 2>/dev/null; then echo "quotes live: $n"; exit 0; fi
+            sleep 2
+          done
+          echo "no quotes flowed" && exit 1
+
+      - name: Smoke test (full trading lifecycle)
+        run: node scripts/smoke-test.mjs
+
+      - name: API matrix (every endpoint × auth × errors)
+        run: node scripts/api-matrix-test.mjs
+
+      - name: MCP adapter protocol conformance
+        run: node scripts/mcp-protocol-test.mjs
+
+      - name: WebSocket relay conformance
+        run: node scripts/ws-relay-test.mjs
