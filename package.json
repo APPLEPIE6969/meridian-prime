@@ -8,9 +8,9 @@
     "node": ">=20.9"
   },
   "scripts": {
-    "dev": "next dev -p 3000",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production node .next/standalone/server.js",
+    "dev": "NEXT_TELEMETRY_DISABLED=1 next dev -p 3000",
+    "build": "NEXT_TELEMETRY_DISABLED=1 next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "start": "NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 node .next/standalone/server.js",
     "lint": "eslint .",
     "db:push": "node scripts/db-push.mjs",
     "db:generate": "prisma generate",

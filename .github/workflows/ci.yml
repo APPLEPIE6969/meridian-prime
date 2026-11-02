@@ -14,6 +14,7 @@ concurrency:
 env:
   MERIDIAN_DATA_PROVIDER: fixture
   MERIDIAN_CLOCK: 2026-01-05T14:30:00Z  # frozen Monday 09:30 ET: deterministic sessions in CI
+  NEXT_TELEMETRY_DISABLED: '1'          # zero outbound traffic except the market data feed
 
 jobs:
   verify:

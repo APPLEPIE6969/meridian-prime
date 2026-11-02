@@ -136,6 +136,31 @@ Rate limit: 120 req/min per key. Errors are structured:
 | `NEXT_PUBLIC_RELAY_URL` | `http://localhost:3003` | browser-side relay endpoint |
 | `MERIDIAN_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
 
+## Data sources & network policy
+
+**Zero accounts, zero API keys, zero credit cards.** Every piece of market
+data — quotes, candles, dividend events, news headlines — is fetched from
+Yahoo Finance's public endpoints with **no authentication of any kind**: no
+API key, no OAuth, no cookie/crumb handshake. The outbound requests carry
+only a browser `User-Agent` (rate-limit etiquette) and an `accept` header.
+
+| outbound host | used for | auth |
+|---------------|----------|------|
+| `query1.finance.yahoo.com` | batched quotes (v7 spark), candles & dividend events (v8 chart) | none — public JSON |
+| `feeds.finance.yahoo.com` | per-symbol news RSS | none — public feed |
+| `localhost` / `127.0.0.1` | the desk's own API, MCP adapter and optional relay | the platform's *own* locally-issued credentials |
+
+Nothing else is contacted: no telemetry, no third-party fonts or CDNs at
+runtime, and the `fixture` data provider (`MERIDIAN_DATA_PROVIDER=fixture`,
+used by CI) is fully offline against recorded payloads. The only secrets in
+the system are issued by the platform itself — agent API keys (`mrp_live_…`),
+the operator passcode and the optional relay token — and they never leave the
+operator's machine.
+
+This policy is enforced by `tests/unit/data-source-policy.test.ts`, which
+fails the build on any new outbound host, any credential header in the data
+plane, any keyed-provider SDK in `package.json`, or any hard-coded secret.
+
 ## Development
 
 ```bash

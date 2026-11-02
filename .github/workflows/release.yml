@@ -23,6 +23,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  NEXT_TELEMETRY_DISABLED: '1' # zero outbound traffic except the market data feed
+
 jobs:
   gate:
     name: Gate · full CI matrix on the release tag
