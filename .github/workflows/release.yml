@@ -75,10 +75,12 @@ jobs:
           mkdir -p "$STAGE/src/mcp"
           cp src/mcp/server.mjs "$STAGE/src/mcp/server.mjs"
 
-          # Socket.IO market relay (source only; operator runs npm ci).
+          # Socket.IO market relay (source only; operator runs npm ci). The
+          # standalone bundle may carry a traced copy — wipe it first so the
+          # source copy is the only one in the artifact.
+          rm -rf "$STAGE/mini-services"
           mkdir -p "$STAGE/mini-services"
           cp -a mini-services/relay "$STAGE/mini-services/relay"
-          rm -rf "$STAGE/mini-services/relay/node_modules"
 
           # Schema + docs needed to bootstrap and operate the install.
           mkdir -p "$STAGE/prisma"
