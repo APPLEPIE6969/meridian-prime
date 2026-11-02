@@ -31,16 +31,23 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'text-summary', 'lcov', 'html'],
       reportsDirectory: 'coverage',
+      // Full server-side surface: every trading, market-data and API module.
+      // The console UI (src/app pages, src/components) is exercised end-to-end
+      // by the e2e suites (smoke, api-matrix, mcp-protocol, ws-relay) against
+      // a real built server instead of mocked component rendering, and the
+      // MCP adapter (mcp/server.mjs) and the Socket.IO relay
+      // (mini-services/relay) run as separate processes validated by the
+      // stealth and relay e2e suites.
       include: ['src/lib/**', 'src/app/api/**'],
-      exclude: ['**/*.d.ts'],
-      // Locked to the measured reality of the suite (minus a hair of slack
-      // for environment variance). CI fails if coverage regresses below
-      // these floors.
+      // Pure type declarations — no runtime statements to cover.
+      exclude: ['**/*.d.ts', 'src/lib/provider/types.ts'],
+      // The suite holds the entire server surface at 100% across all four
+      // metrics; CI fails if any line, branch or function drops out.
       thresholds: {
-        statements: 84,
-        branches: 71,
-        functions: 87,
-        lines: 84,
+        statements: 100,
+        branches: 100,
+        functions: 100,
+        lines: 100,
       },
     },
   },

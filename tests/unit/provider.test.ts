@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { candlesFromChart, dividendsFromChart, parseChartEnvelope, parseRss, parseSparkEnvelope, quoteFromSparkItem } from '@/lib/provider/yahoo'
+import { candlesFromChart, dividendsFromChart, parseChartEnvelope, parseRss, parseSparkEnvelope, quoteFromSparkItem, type SparkItem } from '@/lib/provider/yahoo'
+import { synthBook } from '@/lib/provider/synth'
 import { repoPath } from '@/lib/paths'
 import fs from 'node:fs'
 
@@ -112,5 +113,72 @@ describe('RSS (news wire) parsing', () => {
   it('drops items without a title or link', () => {
     const sample = '<item><guid>g2</guid></item><item><title>T</title><link>https://example.com/b</link><guid>g3</guid></item>'
     expect(parseRss(sample, 'AAPL').length).toBe(1)
+  })
+})
+
+// ── parser edge cases (100% coverage pass) ───────────────────────────────────
+
+describe('quote parsing fallbacks', () => {
+  it('returns null for spark items without a meta block', () => {
+    expect(quoteFromSparkItem({ symbol: 'X', response: [{}] as unknown as SparkItem['response'] })).toBeNull()
+  })
+
+  it('zeroes out non-numeric volume fields', () => {
+    const q = quoteFromSparkItem({ symbol: 'VOL', response: [{ meta: { regularMarketPrice: 5, regularMarketVolume: 'junk' } }] })!
+    expect(q.dayVolume).toBe(0)
+  })
+
+  it('derives the whole book from a bare regularMarketPrice', () => {
+    const q = quoteFromSparkItem({ symbol: 'BARE', response: [{ meta: { regularMarketPrice: 42.5 } }] })!
+    expect(q).not.toBeNull()
+    expect(q.last).toBe(42.5)
+    expect(q.prevClose).toBe(42.5) // no prior close recorded → last
+    expect(q.dayHigh).toBe(42.5)
+    expect(q.dayLow).toBe(42.5)
+    expect(q.dayVolume).toBe(0)
+    expect(Math.abs(q.ts - Date.now())).toBeLessThan(5_000) // no market time → now
+    expect(q.bid).toBeLessThan(q.ask)
+  })
+})
+
+describe('candle and dividend parsing fallbacks', () => {
+  it('returns no candles when timestamps or indicators are missing', () => {
+    expect(candlesFromChart({} as never)).toEqual([])
+    expect(candlesFromChart({ timestamp: [1, 2] } as never)).toEqual([])
+  })
+
+  it('reconstructs bars from close-only series', () => {
+    const bars = candlesFromChart({
+      timestamp: [1000],
+      indicators: { quote: [{ close: [55.5] }] },
+    } as never)
+    expect(bars).toEqual([{ t: 1_000_000, o: 55.5, h: 55.5, l: 55.5, c: 55.5, v: 0 }])
+  })
+
+  it('returns no dividends when the envelope carries no events', () => {
+    expect(dividendsFromChart({} as never)).toEqual([])
+  })
+})
+
+describe('RSS parsing fallbacks', () => {
+  it('uses the link as the identity when guid is missing', () => {
+    const sample = '<item><title>T</title><link>https://example.com/noguid</link></item>'
+    const items = parseRss(sample, 'AAPL')
+    expect(items.length).toBe(1)
+    expect(items[0].providerId).toBe('https://example.com/noguid')
+    expect(items[0].publishedAt.getTime()).toBeGreaterThan(0) // missing pubDate → now
+  })
+})
+
+describe('book synthesis guards', () => {
+  it('re-centers books whose rounding widened the spread', () => {
+    // At 8.01 the cent rounding pushes both sides outward; the guard pulls
+    // the book back to exactly the model spread.
+    const book = synthBook(8.01, 12345)
+    expect(book.ask - book.bid).toBeCloseTo(0.01, 9)
+    expect(book.bid).toBeLessThanOrEqual(8.01)
+    expect(book.ask).toBeGreaterThanOrEqual(8.01)
+    expect(book.bidSize).toBeGreaterThan(0)
+    expect(book.askSize).toBeGreaterThan(0)
   })
 })

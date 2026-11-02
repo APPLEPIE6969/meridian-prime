@@ -35,6 +35,18 @@ export class NewsWire {
     if (this.busy) return 0
     this.busy = true
     try {
+      const stored = await this.refreshLocked(symbols)
+      this.busy = false
+      return stored
+    } catch (err) {
+      this.busy = false
+      throw err
+    }
+  }
+
+  /** The refresh proper — the caller owns the busy latch. */
+  private async refreshLocked(symbols?: string[]): Promise<number> {
+    try {
       const universe = symbols ?? this.nextBatch()
       const provider = activeProvider()
       const items = await provider.getNews(universe, 24)
@@ -69,8 +81,6 @@ export class NewsWire {
       this.lastError = err instanceof Error ? err.message : String(err)
       log('warn', 'news refresh failed', { error: this.lastError })
       return 0
-    } finally {
-      this.busy = false
     }
   }
 
@@ -105,6 +115,11 @@ export class NewsWire {
       summary: row.summary ?? '',
       publishedAt: row.publishedAt.toISOString(),
     }))
+  }
+
+  /** Test seam: read the internal busy latch. */
+  busyHealth(): boolean {
+    return this.busy
   }
 
   start(): void {

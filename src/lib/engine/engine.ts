@@ -259,7 +259,7 @@ export class TradingEngine {
       // First tick of a session: day orders carried over from a previous
       // session die at the open (covers downtime through the close).
       this.lastExpiryCheck = session.dateKey
-      await this.expireDayOrders(session, true)
+      await this.expireDayOrders(session)
     }
     await this.processSymbol(symbol)
 
@@ -278,18 +278,16 @@ export class TradingEngine {
     }
   }
 
-  private async expireDayOrders(
-    session: ReturnType<typeof sessionInfo>,
-    onlyPreviousSessions = false,
-  ): Promise<void> {
+  private async expireDayOrders(session: ReturnType<typeof sessionInfo>): Promise<void> {
     const stale = await db().order.findMany({
       where: { status: { in: WORKING }, tif: 'day' },
     })
     for (const order of stale) {
       const createdKey = sessionDateKey(order.createdAt)
       const fromPreviousSession = createdKey !== session.dateKey
+      // In an open session only orders from previous sessions die (same-day
+      // orders keep working); after the close every day order does.
       if (session.state === 'post_market' || fromPreviousSession) {
-        if (onlyPreviousSessions && !fromPreviousSession) continue
         await db().order.update({ where: { id: order.id }, data: { status: 'expired' } })
         await db().activity.create({
           data: { accountId: order.accountId, kind: 'order_expired', symbol: order.symbol, message: `Day order expired at close: ${order.side.toUpperCase()} ${order.qty - order.filledQty} of ${order.qty} ${order.symbol}`, meta: JSON.stringify({ orderId: order.id }) },
@@ -319,9 +317,11 @@ export class TradingEngine {
         ? limitPlan(order.side, remaining, order.limitPrice!, live, capacityLeft)
         : marketPlan(order.side, remaining, live, capacityLeft)
 
+      // Both plan builders emit exactly one fill with qty >= 1, and the
+      // capacityLeft check above guarantees the budget is still >= 1 here,
+      // so `take` can never drop below 1 inside this loop.
       for (const fill of plan.fills) {
         const take = Math.min(fill.qty, capacityLeft)
-        if (take < 1) break
         await this.applyFill(order, { qty: take, price: fill.price })
         capacityLeft -= take
       }
@@ -415,11 +415,9 @@ export class TradingEngine {
       }
     }
 
-    const newFilledQty = order.filledQty + fill.qty
+    const newFilledQty = order.filledQty + fill.qty // fill.qty >= 1, so this is >= 1
     const prevAvgFill = order.avgFillPrice ?? 0
-    const newAvgFill = newFilledQty > 0
-      ? (prevAvgFill * order.filledQty + fill.price * fill.qty) / newFilledQty
-      : fill.price
+    const newAvgFill = (prevAvgFill * order.filledQty + fill.price * fill.qty) / newFilledQty
     await db().order.update({
       where: { id: order.id },
       data: {

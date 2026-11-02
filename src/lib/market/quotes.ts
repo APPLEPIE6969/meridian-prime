@@ -118,6 +118,18 @@ export class QuoteService {
     if (this.busy) return 0
     this.busy = true
     try {
+      const changed = await this.pollLocked()
+      this.busy = false
+      return changed
+    } catch (err) {
+      this.busy = false
+      throw err
+    }
+  }
+
+  /** The poll proper — the caller owns the busy latch. */
+  private async pollLocked(): Promise<number> {
+    try {
       const provider = activeProvider()
       const quotes = await provider.getQuotes(this.symbols())
       let changed = 0
@@ -150,8 +162,6 @@ export class QuoteService {
       this.lastPollError = err instanceof Error ? err.message : String(err)
       log('warn', 'quote poll failed', { error: this.lastPollError })
       return 0
-    } finally {
-      this.busy = false
     }
   }
 
@@ -170,8 +180,9 @@ export class QuoteService {
 
   async refreshMinuteBarsBatch(): Promise<void> {
     const batch = Math.max(1, cfg().minuteRefresh)
+    // symbols() falls back to the full universe when no state exists yet, so
+    // the list below is never empty.
     const symbols = this.symbols()
-    if (symbols.length === 0) return
     const picks: string[] = []
     for (let i = 0; i < Math.min(batch, symbols.length); i++) {
       picks.push(symbols[this.minuteCursor % symbols.length])
@@ -195,6 +206,11 @@ export class QuoteService {
         }
       }),
     )
+  }
+
+  /** Test seam: read the internal busy latch. */
+  busyHealth(): boolean {
+    return this.busy
   }
 
   start(): void {

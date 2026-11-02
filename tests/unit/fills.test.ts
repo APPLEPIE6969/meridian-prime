@@ -98,3 +98,31 @@ describe('impact model', () => {
     expect(px).toBeCloseTo(100, 2)
   })
 })
+
+// ── no-liquidity guards (100% coverage pass) ─────────────────────────────────
+
+describe('no-liquidity guards', () => {
+  it('returns an empty plan for market orders with zero capacity', () => {
+    const plan = marketPlan('buy', 100, quote(), 0)
+    expect(plan.fills).toEqual([])
+    expect(plan.filledQty).toBe(0)
+    expect(plan.remaining).toBe(100)
+    expect(plan.reason).toBe('no_liquidity')
+  })
+
+  it('clamps negative capacity to zero for market orders', () => {
+    const plan = marketPlan('sell', 100, quote(), -50)
+    expect(plan.reason).toBe('no_liquidity')
+  })
+
+  it('returns an empty plan for marketable limits with zero capacity', () => {
+    const plan = limitPlan('buy', 100, 100.50, quote(), 0)
+    expect(plan.fills).toEqual([])
+    expect(plan.reason).toBe('no_liquidity')
+  })
+
+  it('clamps negative capacity to zero for limit orders', () => {
+    const plan = limitPlan('sell', 100, 99.90, quote(), -1)
+    expect(plan.reason).toBe('no_liquidity')
+  })
+})

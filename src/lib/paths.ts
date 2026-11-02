@@ -29,3 +29,8 @@ export function projectRoot(): string {
 export function repoPath(...segments: string[]): string {
   return path.join(projectRoot(), ...segments)
 }
+
+/** Test seam: forget the cached root so the next lookup re-walks. */
+export function resetProjectRoot(): void {
+  cachedRoot = null
+}

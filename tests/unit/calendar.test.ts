@@ -122,3 +122,60 @@ describe('session state', () => {
     expect(etParts(info.nextClose!).hour).toBe(13)
   })
 })
+
+// ── extended branches (100% coverage pass) ───────────────────────────────────
+
+import { isMarketOpen, sessionState } from '@/lib/calendar'
+
+describe('session state extended branches', () => {
+  it('is closed in the dead hours before 4am ET with a same-day reopen', () => {
+    const info = sessionInfo(d('2026-01-05T06:00:00Z')) // 01:00 ET Monday
+    expect(info.state).toBe('closed')
+    expect(etParts(info.nextOpen!).dateKey).toBe('2026-01-05')
+    expect(etParts(info.nextClose!).hour).toBe(16)
+    expect(info.label).toContain('CLOSED')
+  })
+
+  it('is closed after 8pm ET and points at the next morning', () => {
+    const info = sessionInfo(d('2026-01-06T02:00:00Z')) // 21:00 ET Monday
+    expect(info.state).toBe('closed')
+    expect(etParts(info.nextOpen!).dateKey).toBe('2026-01-06')
+    expect(info.nextClose).toBeNull()
+  })
+
+  it('shows the 13:00 close in pre-market on an early-close day', () => {
+    const info = sessionInfo(d('2026-11-27T13:00:00Z')) // 08:00 ET on the early close
+    expect(info.state).toBe('pre_market')
+    expect(etParts(info.nextClose!).hour).toBe(13)
+  })
+
+  it('exposes the state helpers', () => {
+    expect(sessionState(d('2026-01-05T15:00:00Z'))).toBe('open')
+    expect(isMarketOpen(d('2026-01-05T15:00:00Z'))).toBe(true)
+    expect(isMarketOpen(d('2026-01-03T18:00:00Z'))).toBe(false)
+  })
+
+  it('returns null from nextHoliday once the table is exhausted', () => {
+    expect(nextHoliday(d('2030-06-01T12:00:00Z'))).toBeNull()
+  })
+
+  it('skips holiday keys that are already past', () => {
+    const next = nextHoliday(d('2026-11-30T12:00:00Z'))
+    expect(next!.date).toBe('2026-12-25')
+    expect(upcomingHolidays(d('2030-06-01T12:00:00Z'), 3)).toEqual([])
+  })
+})
+
+describe('wall-time conversion edges', () => {
+  it('resolves summer wall times through the EDT offset', () => {
+    const utc = etDateToUtc('2026-07-15', 9, 30) // EDT: the EST guess misses
+    expect(utc.toISOString()).toBe('2026-07-15T13:30:00.000Z')
+    expect(etParts(utc)).toMatchObject({ dateKey: '2026-07-15', hour: 9, minute: 30 })
+  })
+
+  it('falls back deterministically for wall times that do not exist', () => {
+    // 2026-03-08 02:30 ET is skipped by the spring-forward transition.
+    const utc = etDateToUtc('2026-03-08', 2, 30)
+    expect(utc.toISOString()).toBe('2026-03-08T07:30:00.000Z')
+  })
+})

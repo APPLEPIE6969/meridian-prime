@@ -63,3 +63,26 @@ describe('fee schedule', () => {
     expect(fees.total).toBe(0.02) // + TAF 0.01
   })
 })
+
+// ── formatting helpers (100% coverage pass) ──────────────────────────────────
+
+import { fmtPct, fmtUsd, isBuySide } from '@/lib/money'
+
+describe('formatting helpers', () => {
+  it('classifies order sides', () => {
+    expect(isBuySide('buy')).toBe(true)
+    expect(isBuySide('sell')).toBe(false)
+    expect(isBuySide('')).toBe(false)
+  })
+
+  it('formats dollars with grouping', () => {
+    expect(fmtUsd(1234.5)).toBe('$1,234.50')
+    expect(fmtUsd(-0.01)).toBe('-$0.01')
+  })
+
+  it('signs percentages only on the positive side', () => {
+    expect(fmtPct(0.125)).toBe('+12.50%')
+    expect(fmtPct(-0.03)).toBe('-3.00%')
+    expect(fmtPct(0)).toBe('+0.00%')
+  })
+})

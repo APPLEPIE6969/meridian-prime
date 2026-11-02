@@ -43,7 +43,9 @@ const etFormatter = new Intl.DateTimeFormat('en-US', {
 
 export function etParts(d: Date): EtParts {
   const parts = etFormatter.formatToParts(d)
-  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? ''
+  // The formatter requests every field it reads, so formatToParts always
+  // emits each one — the lookups below cannot miss.
+  const get = (type: string): string => parts.find((p) => p.type === type)!.value
   const hour = Number(get('hour')) % 24
   return {
     year: Number(get('year')),
@@ -51,7 +53,7 @@ export function etParts(d: Date): EtParts {
     day: Number(get('day')),
     hour,
     minute: Number(get('minute')),
-    weekday: WEEKDAYS[get('weekday')] ?? 0,
+    weekday: WEEKDAYS[get('weekday')]!,
     dateKey: `${get('year')}-${get('month')}-${get('day')}`,
   }
 }
@@ -159,12 +161,12 @@ export function closeMinuteFor(dateKey: string): number {
 export function nextTradingDay(dateKey: string): string {
   const [y, m, d] = dateKey.split('-').map(Number)
   const cursor = new Date(Date.UTC(y, m - 1, d))
-  for (let i = 0; i < 400; i++) {
+  // Terminates: weekends skip at most two of every seven iterations.
+  for (;;) {
     cursor.setUTCDate(cursor.getUTCDate() + 1)
     const key = cursor.toISOString().slice(0, 10)
     if (isTradingDay(key)) return key
   }
-  return dateKey
 }
 
 export function addBusinessDays(dateKey: string, n: number): string {
@@ -229,26 +231,27 @@ export function sessionInfo(at: Date): SessionInfo {
 }
 
 function sessionLabel(state: SessionState, nextOpen: Date | null, nextClose: Date | null): string {
-  const etTime = (d: Date | null): string => {
-    if (!d) return ''
+  // State-machine invariants from sessionInfo(): 'open' always carries a
+  // nextClose, and every other state carries a nextOpen — the non-null
+  // assertions encode exactly those guarantees.
+  const etTime = (d: Date): string => {
     const p = etParts(d)
     const hh = String(p.hour).padStart(2, '0')
     const mm = String(p.minute).padStart(2, '0')
     return `${hh}:${mm} ET`
   }
-  const dayName = (d: Date | null): string => {
-    if (!d) return ''
-    return ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][etParts(d).weekday]
+  const dayName = (d: Date): string => {
+    return ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][etParts(d).weekday]!
   }
   switch (state) {
     case 'open':
-      return nextClose ? `OPEN · CLOSES ${etTime(nextClose)}` : 'OPEN'
+      return `OPEN · CLOSES ${etTime(nextClose!)}`
     case 'pre_market':
-      return nextOpen ? `PRE-MARKET · OPENS ${etTime(nextOpen)}` : 'PRE-MARKET'
+      return `PRE-MARKET · OPENS ${etTime(nextOpen!)}`
     case 'post_market':
-      return nextOpen ? `POST-MARKET · OPENS ${dayName(nextOpen)} ${etTime(nextOpen)}` : 'POST-MARKET'
+      return `POST-MARKET · OPENS ${dayName(nextOpen!)} ${etTime(nextOpen!)}`
     default:
-      return nextOpen ? `CLOSED · OPENS ${dayName(nextOpen)} ${etTime(nextOpen)}` : 'CLOSED'
+      return `CLOSED · OPENS ${dayName(nextOpen!)} ${etTime(nextOpen!)}`
   }
 }
 

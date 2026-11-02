@@ -161,3 +161,59 @@ describe('quote service lifecycle', () => {
     qs.stop() // idempotent
   })
 })
+
+describe('live adapter edge paths', () => {
+  it('wraps non-Error rejections from fetch into Errors', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject('total connection failure'))
+    await expect(yahooProvider.getQuote('AAPL')).rejects.toThrow('total connection failure')
+  })
+
+  it('keeps usable quotes when one spark item is unparseable', async () => {
+    const brokenSpark = { spark: { result: [{ symbol: 'JUNK', response: [] }, ...parseSparkEnvelopeItems(spark)] } }
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify(brokenSpark), { status: 200 })))
+    const quotes = await yahooProvider.getQuotes(['AAPL', 'JUNK'])
+    expect(quotes.length).toBeGreaterThan(0)
+    expect(quotes.every((q) => q.symbol !== 'JUNK')).toBe(true)
+  })
+
+  it('falls back on missing chart sections', async () => {
+    // minute bars with no indicator sections parse to nothing
+    const empty = { chart: { result: [{ meta: {}, timestamp: [1, 2] }] } }
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify(empty), { status: 200 })))
+    expect(await yahooProvider.getMinuteBars('AAPL')).toEqual([])
+    expect(await yahooProvider.getDailyHistory('AAPL')).toEqual([])
+    expect(await yahooProvider.getDividends('AAPL')).toEqual([])
+  })
+
+  it('returns null for a single quote the batch cannot provide', async () => {
+    const brokenSpark = { spark: { result: [{ symbol: 'JUNK', response: [] }] } }
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify(brokenSpark), { status: 200 })))
+    expect(await yahooProvider.getQuote('JUNK')).toBeNull()
+  })
+
+  it('serves empty series when the chart envelope reports an error', async () => {
+    const errorEnvelope = { chart: { error: { code: 'Bad Request', description: 'nope' } } }
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify(errorEnvelope), { status: 200 })))
+    expect(await yahooProvider.getMinuteBars('AAPL')).toEqual([])
+    expect(await yahooProvider.getDailyHistory('AAPL')).toEqual([])
+    expect(await yahooProvider.getDividends('AAPL')).toEqual([])
+  })
+
+  it('deduplicates headlines arriving from two symbol feeds', async () => {
+    let call = 0
+    vi.stubGlobal('fetch', () => {
+      call++
+      return Promise.resolve(new Response(rss, { status: 200 }))
+    })
+    const news = await yahooProvider.getNews(['AAPL', 'MSFT'], 50)
+    expect(call).toBe(2) // both feeds fetched
+    const ids = news.map((n) => n.providerId)
+    expect(new Set(ids).size).toBe(ids.length) // no duplicates survived
+  })
+})
+
+// Local helper: the recorded spark payload's items, re-exported for reuse.
+function parseSparkEnvelopeItems(payload: unknown): Array<Record<string, unknown>> {
+  const envelope = payload as { spark?: { result?: Array<Record<string, unknown>> } }
+  return envelope?.spark?.result ?? []
+}

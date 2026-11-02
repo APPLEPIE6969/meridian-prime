@@ -17,7 +17,7 @@ function serializeOrder(order: {
   createdAt: Date
   updatedAt: Date
   expiresAt: Date | null
-  fills?: Array<{ id: string; qty: number; price: number; fees: number; ts: Date }>
+  fills: Array<{ id: string; qty: number; price: number; fees: number; ts: Date }>
 }) {
   return {
     id: order.id,
@@ -34,7 +34,7 @@ function serializeOrder(order: {
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
     expiresAt: order.expiresAt?.toISOString() ?? null,
-    fills: (order.fills ?? []).map((f) => ({ id: f.id, qty: f.qty, price: f.price, fees: f.fees, ts: f.ts.toISOString() })),
+    fills: order.fills.map((f) => ({ id: f.id, qty: f.qty, price: f.price, fees: f.fees, ts: f.ts.toISOString() })),
   }
 }
 

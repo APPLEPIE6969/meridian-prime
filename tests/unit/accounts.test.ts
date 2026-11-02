@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { createAgent, findAccountByKey, hashKey, isPdtRestricted, marginRequirement, dayTradeWindowStart } from '@/lib/engine/accounts'
-import { db } from '@/lib/db'
+import { computeMetrics, createAgent, findAccountByKey, hashKey, isPdtRestricted, marginRequirement, dayTradeWindowStart } from '@/lib/engine/accounts'
+import { db, setDb } from '@/lib/db'
+import type { PrismaClient } from '@prisma/client'
 import { etParts } from '@/lib/calendar'
 
 async function cleanup(name: string): Promise<void> {
@@ -82,5 +83,61 @@ describe('day trade window', () => {
     const parts = etParts(start)
     expect(parts.dateKey).toBe('2025-12-29') // Mon - 4 business days
     expect(parts.hour).toBe(0)
+  })
+})
+
+// ── provisioning and lookup edges (100% coverage pass) ───────────────────────
+
+describe('agent provisioning edges', () => {
+  it('rejects non-positive starting cash', async () => {
+    await expect(createAgent('bad-cash', { startingCash: 0 })).rejects.toThrow('starting cash must be a positive amount')
+    await expect(createAgent('bad-cash', { startingCash: Number.NaN })).rejects.toThrow()
+  })
+
+  it('returns null for junk or short API keys', async () => {
+    expect(await findAccountByKey('short')).toBeNull()
+    expect(await findAccountByKey('mrp_live_definitely_not_a_real_key')).toBeNull()
+  })
+
+  it('scores accounts with no cash ledger at zero', async () => {
+    const row = await db().account.create({
+      data: { name: 'bare', keyHash: 'bare-hash', keyPreview: 'mrp_live_…bare', kind: 'margin', startingCash: 1000 },
+    })
+    const metrics = await computeMetrics(row.id, () => null)
+    expect(metrics).not.toBeNull()
+    expect(metrics!.cash).toBe(0)
+    expect(metrics!.settledCash).toBe(0)
+    expect(metrics!.equity).toBe(0)
+    expect(metrics!.buyingPower).toBe(0) // margin: 2 * max(0, 0 − 0) floored at 0
+  })
+})
+
+describe('ledger aggregation edges', () => {
+  it('treats a null ledger sum as zero', async () => {
+    const creds = await createAgent('null-sum')
+    const real = db()
+    const cashLedgerProxy = new Proxy(real.cashLedger, {
+      get(target, prop, receiver) {
+        if (prop === 'groupBy') {
+          return async () => [{ settled: true, _sum: { amount: null } }]
+        }
+        const value = Reflect.get(target, prop, receiver)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const shell = new Proxy(real, {
+      get(target, prop, receiver) {
+        return prop === 'cashLedger' ? cashLedgerProxy : Reflect.get(target, prop, receiver)
+      },
+    })
+    setDb(shell as unknown as PrismaClient)
+    try {
+      const metrics = await computeMetrics(creds.accountId, () => null)
+      // The defensive `?? 0` keeps the math intact on a null aggregate.
+      expect(metrics!.cash).toBe(0)
+      expect(metrics!.settledCash).toBe(0)
+    } finally {
+      setDb(real)
+    }
   })
 })
