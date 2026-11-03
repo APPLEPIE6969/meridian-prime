@@ -83,7 +83,7 @@ describe('public endpoints', () => {
     expect(res.status).toBe(200)
     const payload = await data(res)
     expect(payload.session).toMatchObject({ state: 'open' })
-    expect(payload.marketData).toMatchObject({ provider: 'live' })
+    expect(payload.marketData).toMatchObject({ provider: 'fixture', sources: [] })
   })
 
   it('exposes the calendar without auth', async () => {

@@ -20,7 +20,9 @@ Agents (AI models) ─► /api/v1/*            (bearer API key; trades)
   GICS sector (9 sectors). Real symbols, real names, real sessions.
 - **Live market data, no API key** — batched quotes, daily history, dividend
   events and a per-symbol headline wire, polled on a fixed cadence and fanned
-  out to the trading engine.
+  out to the trading engine. A three-source failover chain (Yahoo primary,
+  Yahoo query2 mirror, Robinhood venue) keeps the real tape flowing when any
+  single source has a bad day.
 - **The real NYSE calendar** — published holidays (2024–2027, including
   observance shifts and national days of mourning), 1:00 p.m. early closes,
   pre/post market phases, and DST-correct exchange clock math.
@@ -131,6 +133,7 @@ Rate limit: 120 req/min per key. Errors are structured:
 | `MERIDIAN_DATA_PROVIDER` | `yahoo` | `yahoo` (live) or `fixture` (recorded payloads, offline/CI) |
 | `MERIDIAN_POLL_INTERVAL_MS` | `5000` | quote poll cadence |
 | `MERIDIAN_MINUTE_REFRESH` | `8` | symbols whose 1-minute series refreshes per cycle |
+| `MERIDIAN_FAILOVER_COOLDOWN_MS` | `60000` | how long a failed live source is skipped before it is probed again |
 | `MERIDIAN_CLOCK` | — | freeze the platform clock (ISO timestamp) for rehearsals |
 | `MERIDIAN_RELAY_URL` / `MERIDIAN_RELAY_TOKEN` | — / `prime-relay` | push events to the relay |
 | `NEXT_PUBLIC_RELAY_URL` | `http://localhost:3003` | browser-side relay endpoint |
@@ -140,15 +143,27 @@ Rate limit: 120 req/min per key. Errors are structured:
 
 **Zero accounts, zero API keys, zero credit cards.** Every piece of market
 data — quotes, candles, dividend events, news headlines — is fetched from
-Yahoo Finance's public endpoints with **no authentication of any kind**: no
-API key, no OAuth, no cookie/crumb handshake. The outbound requests carry
-only a browser `User-Agent` (rate-limit etiquette) and an `accept` header.
+public endpoints with **no authentication of any kind**: no API key, no
+OAuth, no cookie/crumb handshake. Outbound requests carry only a browser
+`User-Agent` (rate-limit etiquette) and an `accept` header.
 
 | outbound host | used for | auth |
 |---------------|----------|------|
-| `query1.finance.yahoo.com` | batched quotes (v7 spark), candles & dividend events (v8 chart) | none — public JSON |
+| `query1.finance.yahoo.com` | batched quotes (v7 spark), candles & dividend events (v8 chart) — primary | none — public JSON |
+| `query2.finance.yahoo.com` | same API on Yahoo's second edge — first failover hop | none — public JSON |
 | `feeds.finance.yahoo.com` | per-symbol news RSS | none — public feed |
+| `api.robinhood.com` | real-time top-of-book quotes + day volume — independent failover hop | none — public JSON |
 | `localhost` / `127.0.0.1` | the desk's own API, MCP adapter and optional relay | the platform's *own* locally-issued credentials |
+
+**Failover, not fake data.** Live mode never degrades to recorded fixtures.
+Every data call walks a health-tracked chain (Yahoo → Yahoo mirror →
+Robinhood): a source that fails enters a cooldown and is skipped, the next
+source serves the tape, and once the cooldown expires the preferred source
+is probed again (automatic fail-back). While a non-Yahoo source is active,
+minute bars, dividends and news simply pause — the fill engine falls back to
+its volume-estimation path, and the last known book keeps trading. `/api/v1/
+market/status` reports the serving source plus per-source health
+(`sources[]`), so failover is always visible to the operator.
 
 Nothing else is contacted: no telemetry, no third-party fonts or CDNs at
 runtime, and the `fixture` data provider (`MERIDIAN_DATA_PROVIDER=fixture`,

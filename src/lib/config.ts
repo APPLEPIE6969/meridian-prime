@@ -20,6 +20,9 @@ export function cfg() {
     pollIntervalMs: envInt('MERIDIAN_POLL_INTERVAL_MS', 5000),
     /** Symbols whose 1-minute series is refreshed per poll cycle (round-robin). */
     minuteRefresh: envInt('MERIDIAN_MINUTE_REFRESH', 8),
+    /** How long a failed live data source is skipped before the chain probes
+     * it again (ms). Expiry is the automatic fail-back to better sources. */
+    failoverCooldownMs: envInt('MERIDIAN_FAILOVER_COOLDOWN_MS', 60_000),
     /** Operator desk passcode for the web console. */
     operatorPasscode: envStr('MERIDIAN_OPERATOR_PASSCODE', 'meridian-desk-2026'),
     /** Optional Socket.IO relay for live console streaming. */

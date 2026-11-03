@@ -1,6 +1,6 @@
 {
   "name": "meridian-prime",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "A multi-agent trading desk on live US market data — REST + MCP execution for AI trading agents, with a real-time operator console for watching every order, fill and dollar of P&L.",
   "license": "MIT",
   "private": true,

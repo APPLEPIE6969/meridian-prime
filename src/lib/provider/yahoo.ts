@@ -1,56 +1,28 @@
-// Live Yahoo Finance adapter — the desk's production data source.
+// Live Yahoo Finance adapter — the desk's primary data source.
 //
 // Endpoints (no API key):
 //   v7 spark   — batch quotes, ≤16 symbols per call, per-symbol URI encoding
 //   v8 chart   — candles (1m/1d), quote meta, dividend events
 //   RSS feed   — per-symbol headline wire
 //
+// The adapter is a factory so the failover chain can run a second instance
+// against Yahoo's query2 infrastructure (same API shape, independent edge).
+//
 // All parses are pure exported functions so the unit suite can drive them
 // against recorded real payloads (tests/fixtures/*) without network access.
 
 import { round2 } from '../money'
 import { synthBook } from './synth'
+import { fetchJsonWithRetry, fetchTextWithRetry } from './http'
 import type { Candle, DividendEvent, MarketDataProvider, NewsHeadline, Quote } from './types'
 
-const BASE = 'https://query1.finance.yahoo.com'
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const MAX_BATCH = 16
-const TIMEOUT_MS = 12_000
 
 interface ChartResult {
   meta: Record<string, unknown>
   timestamp?: number[]
   indicators?: { quote?: Array<Record<string, Array<number | null>>> }
   events?: { dividends?: Record<string, { amount: number; date: number }> }
-}
-
-async function fetchWithRetry(url: string, attempts = 3): Promise<Response> {
-  let lastError: unknown
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': UA, accept: 'application/json,text/plain,*/*' },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      })
-      if (res.status === 429 || res.status >= 500) {
-        lastError = new Error(`upstream ${res.status} for ${url}`)
-        await new Promise((r) => setTimeout(r, 800 * (i + 1)))
-        continue
-      }
-      if (!res.ok) throw new Error(`upstream ${res.status} for ${url}`)
-      return res
-    } catch (err) {
-      lastError = err
-      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, 800 * (i + 1)))
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError))
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetchWithRetry(url)
-  return (await res.json()) as T
 }
 
 // ── Parsers (pure) ───────────────────────────────────────────────────────────
@@ -183,76 +155,82 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out
 }
 
-export const yahooProvider: MarketDataProvider = {
-  name: 'yahoo',
+export function createYahooProvider(base: string, name: string): MarketDataProvider {
+  return {
+    name,
 
-  async getQuote(symbol) {
-    const rows = await this.getQuotes([symbol])
-    return rows[0] ?? null
-  },
+    async getQuote(symbol) {
+      const rows = await this.getQuotes([symbol])
+      return rows[0] ?? null
+    },
 
-  async getQuotes(symbols) {
-    const batches = chunk(symbols, MAX_BATCH)
-    const results = await Promise.all(
-      batches.map(async (batch) => {
-        const qs = batch.map(encodeURIComponent).join(',')
-        const url = `${BASE}/v7/finance/spark?symbols=${qs}&range=1d&interval=5m`
-        const payload = await fetchJson<unknown>(url)
-        return parseSparkEnvelope(payload)
-          .map(quoteFromSparkItem)
-          .filter((q): q is Quote => q !== null)
-      }),
-    )
-    return results.flat()
-  },
+    async getQuotes(symbols) {
+      const batches = chunk(symbols, MAX_BATCH)
+      const results = await Promise.all(
+        batches.map(async (batch) => {
+          const qs = batch.map(encodeURIComponent).join(',')
+          const url = `${base}/v7/finance/spark?symbols=${qs}&range=1d&interval=5m`
+          const payload = await fetchJsonWithRetry<unknown>(url)
+          return parseSparkEnvelope(payload)
+            .map(quoteFromSparkItem)
+            .filter((q): q is Quote => q !== null)
+        }),
+      )
+      return results.flat()
+    },
 
-  async getMinuteBars(symbol) {
-    const url = `${BASE}/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m&includePrePost=false`
-    const payload = await fetchJson<unknown>(url)
-    const result = parseChartEnvelope(payload)
-    return result ? candlesFromChart(result) : []
-  },
+    async getMinuteBars(symbol) {
+      const url = `${base}/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m&includePrePost=false`
+      const payload = await fetchJsonWithRetry<unknown>(url)
+      const result = parseChartEnvelope(payload)
+      return result ? candlesFromChart(result) : []
+    },
 
-  async getDailyHistory(symbol, range = '5y') {
-    const url = `${BASE}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${encodeURIComponent(range)}&interval=1d`
-    const payload = await fetchJson<unknown>(url)
-    const result = parseChartEnvelope(payload)
-    return result ? candlesFromChart(result) : []
-  },
+    async getDailyHistory(symbol, range = '5y') {
+      const url = `${base}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${encodeURIComponent(range)}&interval=1d`
+      const payload = await fetchJsonWithRetry<unknown>(url)
+      const result = parseChartEnvelope(payload)
+      return result ? candlesFromChart(result) : []
+    },
 
-  async getDividends(symbol, range = '6mo') {
-    const url = `${BASE}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${encodeURIComponent(range)}&interval=1d&events=div`
-    const payload = await fetchJson<unknown>(url)
-    const result = parseChartEnvelope(payload)
-    return result ? dividendsFromChart(result) : []
-  },
+    async getDividends(symbol, range = '6mo') {
+      const url = `${base}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${encodeURIComponent(range)}&interval=1d&events=div`
+      const payload = await fetchJsonWithRetry<unknown>(url)
+      const result = parseChartEnvelope(payload)
+      return result ? dividendsFromChart(result) : []
+    },
 
-  async getNews(symbols, limit = 12) {
-    const capped = symbols.slice(0, 8)
-    const feeds = await Promise.all(
-      capped.map(async (symbol) => {
-        const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(symbol)}&region=US&lang=en-US`
-        const res = await fetchWithRetry(url)
-        const xml = await res.text()
-        return parseRss(xml, symbol).map((item) => ({ ...item, symbols: [symbol] }))
-      }),
-    )
-    const seen = new Set<string>()
-    const merged: NewsHeadline[] = []
-    for (const feed of feeds.flat()) {
-      if (seen.has(feed.providerId)) continue
-      seen.add(feed.providerId)
-      merged.push({
-        providerId: feed.providerId,
-        headline: feed.headline,
-        source: 'Yahoo Finance',
-        url: feed.url,
-        symbols: feed.symbols,
-        summary: feed.summary,
-        publishedAt: feed.publishedAt,
-      })
-      if (merged.length >= limit) break
-    }
-    return merged
-  },
+    async getNews(symbols, limit = 12) {
+      const capped = symbols.slice(0, 8)
+      const feeds = await Promise.all(
+        capped.map(async (symbol) => {
+          const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(symbol)}&region=US&lang=en-US`
+          const xml = await fetchTextWithRetry(url)
+          return parseRss(xml, symbol).map((item) => ({ ...item, symbols: [symbol] }))
+        }),
+      )
+      const seen = new Set<string>()
+      const merged: NewsHeadline[] = []
+      for (const feed of feeds.flat()) {
+        if (seen.has(feed.providerId)) continue
+        seen.add(feed.providerId)
+        merged.push({
+          providerId: feed.providerId,
+          headline: feed.headline,
+          source: 'Yahoo Finance',
+          url: feed.url,
+          symbols: feed.symbols,
+          summary: feed.summary,
+          publishedAt: feed.publishedAt,
+        })
+        if (merged.length >= limit) break
+      }
+      return merged
+    },
+  }
 }
+
+export const yahooProvider = createYahooProvider('https://query1.finance.yahoo.com', 'yahoo')
+
+/** Same API against Yahoo's query2 edge — the first failover hop. */
+export const yahooMirrorProvider = createYahooProvider('https://query2.finance.yahoo.com', 'yahoo-mirror')

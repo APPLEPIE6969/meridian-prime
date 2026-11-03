@@ -20,11 +20,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import { join } from 'node:path'
-import { yahooProvider } from '@/lib/provider/yahoo'
+import { robinhoodProvider } from '@/lib/provider/robinhood'
+import { yahooMirrorProvider, yahooProvider } from '@/lib/provider/yahoo'
 import { repoPath } from '@/lib/paths'
 
-/** The only third-party hosts the runtime may ever talk to. */
-const ALLOWED_DATA_HOSTS = new Set(['query1.finance.yahoo.com', 'feeds.finance.yahoo.com'])
+/** The only third-party hosts the runtime may ever talk to — the live
+ * failover chain (Yahoo primary + query2 mirror + Robinhood venue). All
+ * public and keyless; each was verified live before being allowlisted. */
+const ALLOWED_DATA_HOSTS = new Set([
+  'query1.finance.yahoo.com',
+  'query2.finance.yahoo.com',
+  'feeds.finance.yahoo.com',
+  'api.robinhood.com',
+])
 /** The operator's own machine (own API, optional relay, browser SSE). */
 const ALLOWED_LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
@@ -37,7 +45,7 @@ const SECRET_LITERAL =
   /sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{12,}|AIza[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}/
 
 /** Config members the data plane may consult (all operational, none secret). */
-const DATA_PLANE_CONFIG = new Set(['dataProvider', 'minuteRefresh', 'pollIntervalMs'])
+const DATA_PLANE_CONFIG = new Set(['dataProvider', 'minuteRefresh', 'pollIntervalMs', 'failoverCooldownMs'])
 
 const CODE_EXT = /\.(ts|tsx|mts|mjs|js)$/
 
@@ -64,6 +72,8 @@ const intraday = JSON.parse(fs.readFileSync(repoPath('tests', 'fixtures', 'chart
 const daily = JSON.parse(fs.readFileSync(repoPath('tests', 'fixtures', 'chart-AAPL-daily.json'), 'utf8'))
 const dividends = JSON.parse(fs.readFileSync(repoPath('tests', 'fixtures', 'chart-AAPL-dividends.json'), 'utf8'))
 const rss = fs.readFileSync(repoPath('tests', 'fixtures', 'news-AAPL.xml'), 'utf8')
+const rhBatch = JSON.parse(fs.readFileSync(repoPath('tests', 'fixtures', 'robinhood-batch.json'), 'utf8'))
+const rhFund = JSON.parse(fs.readFileSync(repoPath('tests', 'fixtures', 'robinhood-fund.json'), 'utf8'))
 
 interface Call {
   url: string
@@ -82,6 +92,18 @@ beforeEach(() => {
     if (u.includes('events=div')) return Promise.resolve(new Response(JSON.stringify(dividends), { status: 200 }))
     if (u.includes('/v8/finance/chart')) return Promise.resolve(new Response(JSON.stringify(daily), { status: 200 }))
     if (u.includes('feeds.finance.yahoo.com')) return Promise.resolve(new Response(rss, { status: 200 }))
+    if (u.includes('/quotes/?symbols=')) {
+      const requested = u.split('symbols=')[1].split(',').map((s) => decodeURIComponent(s))
+      const rows = rhBatch.results.filter((r: { symbol: string }) => requested.includes(r.symbol))
+      return Promise.resolve(new Response(JSON.stringify({ results: rows }), { status: 200 }))
+    }
+    if (u.includes('/fundamentals/?symbols=')) {
+      const requested = u.split('symbols=')[1].split(',').map((s) => decodeURIComponent(s))
+      const pairs = rhBatch.results
+        .map((r: { symbol: string }, i: number) => ({ symbol: r.symbol, fund: rhFund.results[i] }))
+        .filter((p: { symbol: string }) => requested.includes(p.symbol))
+      return Promise.resolve(new Response(JSON.stringify({ results: pairs.map((p: { fund: unknown }) => p.fund) }), { status: 200 }))
+    }
     return Promise.resolve(new Response('not found', { status: 404 }))
   })
 })
@@ -91,15 +113,18 @@ afterEach(() => {
 })
 
 describe('data-source policy: runtime proof', () => {
-  it('every live-provider request is credential-free and hits an allowlisted Yahoo host', async () => {
-    // Drive every fetch path the production data plane owns.
+  it('every live-provider request is credential-free and hits an allowlisted data host', async () => {
+    // Drive every fetch path the production data plane owns: the yahoo
+    // adapter (primary), its query2 mirror, and the robinhood venue.
     await yahooProvider.getQuotes(['AAPL', 'MSFT'])
     await yahooProvider.getMinuteBars('AAPL')
     await yahooProvider.getDailyHistory('AAPL')
     await yahooProvider.getDividends('AAPL')
     await yahooProvider.getNews(['AAPL', 'MSFT'], 5)
+    await yahooMirrorProvider.getQuotes(['AAPL'])
+    await robinhoodProvider.getQuotes(['AAPL'])
 
-    expect(calls.length).toBeGreaterThanOrEqual(6)
+    expect(calls.length).toBeGreaterThanOrEqual(8)
     for (const call of calls) {
       const host = new URL(call.url).hostname
       expect(ALLOWED_DATA_HOSTS.has(host), `unexpected data host: ${host}`).toBe(true)
@@ -151,7 +176,9 @@ describe('data-source policy: source scan', () => {
 
 describe('data-source policy: data plane hygiene', () => {
   const dataPlane = [
-    ...['yahoo.ts', 'fixture.ts', 'synth.ts'].map((f) => ({ file: `src/lib/provider/${f}` })),
+    ...['yahoo.ts', 'fixture.ts', 'synth.ts', 'robinhood.ts', 'chain.ts', 'http.ts'].map((f) => ({
+      file: `src/lib/provider/${f}`,
+    })),
     ...['quotes.ts', 'candles.ts', 'news.ts'].map((f) => ({ file: `src/lib/market/${f}` })),
   ].map(({ file }) => ({ file, text: fs.readFileSync(repoPath(...file.split('/')), 'utf8') }))
 
@@ -169,9 +196,9 @@ describe('data-source policy: data plane hygiene', () => {
     }
   })
 
-  it('only the yahoo adapter performs network I/O', () => {
+  it('only the market data adapters perform network I/O', () => {
     for (const { file, text } of dataPlane) {
-      if (file.endsWith('yahoo.ts')) continue
+      if (file.endsWith('yahoo.ts') || file.endsWith('robinhood.ts') || file.endsWith('http.ts')) continue
       expect(text.match(/\bfetch\(/), `${file} performs network I/O`).toBeNull()
     }
   })
